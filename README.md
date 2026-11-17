@@ -50,6 +50,7 @@ Optional -q quality (0-100) applies only to AVIF and JPEG; if omitted,
 ImageMagick's default quality is used.
 
 Input is a file or a glob pattern. Quote glob patterns to prevent shell expansion.
+Use **/ to match zero or more directory levels (without following symlinked directories).
 By default, output files are saved alongside their inputs. If specified,
 outdir must be an existing directory.
 ```
@@ -57,12 +58,30 @@ outdir must be an existing directory.
 ## Examples
 
 ```sh
+# Convert a PNG to WebP alongside the original.
 qic webp photo.png
+
+# Convert PNGs in photos/ to JPEG XL in converted/.
 qic jxl 'photos/*.png' converted/
+
+# Convert WebP files recursively to JPEG XL alongside their originals.
+qic jxl 'photos/**/*.webp'
+
+# Save a converted file in an existing output directory.
 qic webp photo.png converted/
+
+# Limit the output width to 100 pixels.
 qic -size 100x webp photo.png
+
+# Limit the output height to 100 pixels.
 qic -size x100 jxl 'photos/*.png' converted/
+
+# Fit the output within 100 by 100 pixels.
 qic -size 100x100 webp photo.png
+
+# Convert to AVIF with quality 80.
 qic -q 80 avif photo.png
+
+# Resize and convert to JPEG with quality 85.
 qic -size 100x100 -q 85 jpeg photo.png converted/
 ```

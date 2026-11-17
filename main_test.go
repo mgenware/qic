@@ -150,6 +150,52 @@ func TestGlobAndOutputDirectory(t *testing.T) {
 	}
 }
 
+func TestRecursiveGlob(t *testing.T) {
+	installFakeEncoder(t, "magick", fakeMagick)
+	dir := t.TempDir()
+	for _, name := range []string{"root.webp", "child/one.webp", "child/deep/two.webp", "special[1]/three.webp", "special[1]/star*/four.webp", "child/ignore.png"} {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, path, "source")
+	}
+	if err := os.Symlink(filepath.Join(dir, "child"), filepath.Join(dir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, pattern := range []string{
+		filepath.Join(dir, "**", "*.webp"),
+		filepath.Join(dir, "**", "**", "*.webp"),
+	} {
+		inputs, err := findInputs(pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(inputs) != 5 {
+			t.Fatalf("pattern %q matched %v, want 5 files", pattern, inputs)
+		}
+		if err := run([]string{"jxl", pattern}, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"root.jxl", "child/one.jxl", "child/deep/two.jxl", "special[1]/three.jxl", "special[1]/star*/four.jxl"} {
+		if got := readFile(t, filepath.Join(dir, name)); got != "converted" {
+			t.Fatalf("%s = %q", name, got)
+		}
+	}
+
+	inputs, err := findInputs(filepath.Join(dir, "special*", "**", "*.webp"))
+	if err != nil || len(inputs) != 2 {
+		t.Fatalf("wildcard prefix: inputs = %q, error = %v", inputs, err)
+	}
+	for _, pattern := range []string{filepath.Join(dir, "**", "*.missing"), filepath.Join(dir, "**", "[")} {
+		if _, err := findInputs(pattern); err == nil {
+			t.Fatalf("expected error for %q", pattern)
+		}
+	}
+}
+
 func TestSingleInputOutputDirectory(t *testing.T) {
 	installFakeEncoder(t, "magick", fakeMagick)
 	dir := t.TempDir()

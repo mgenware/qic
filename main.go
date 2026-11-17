@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -27,6 +28,7 @@ Optional -q quality (0-100) applies only to AVIF and JPEG; if omitted,
 ImageMagick's default quality is used.
 
 Input is a file or a glob pattern. Quote glob patterns to prevent shell expansion.
+Use **/ to match zero or more directory levels (without following symlinked directories).
 By default, output files are saved alongside their inputs. If specified,
 outdir must be an existing directory.
 `
@@ -116,9 +118,12 @@ func findInputs(pattern string) ([]string, error) {
 			return nil, fmt.Errorf("inspect input %q: %w", pattern, err)
 		}
 		var globErr error
-		matches, globErr = filepath.Glob(pattern)
+		matches, globErr = globInputs(pattern)
 		if globErr != nil {
-			return nil, fmt.Errorf("invalid input glob %q: %w", pattern, globErr)
+			if errors.Is(globErr, filepath.ErrBadPattern) {
+				return nil, fmt.Errorf("invalid input glob %q: %w", pattern, globErr)
+			}
+			return nil, fmt.Errorf("match input glob %q: %w", pattern, globErr)
 		}
 		if len(matches) == 0 {
 			return nil, fmt.Errorf("no files match input %q", pattern)
@@ -140,6 +145,94 @@ func findInputs(pattern string) ([]string, error) {
 		matches[i] = absolute
 	}
 	return matches, nil
+}
+
+func globInputs(pattern string) ([]string, error) {
+	if _, err := filepath.Match(pattern, ""); err != nil {
+		return nil, err
+	}
+
+	separator := string(filepath.Separator)
+	parts := strings.Split(pattern, separator)
+	for i := 0; i < len(parts)-1; i++ {
+		if parts[i] != "**" {
+			continue
+		}
+
+		rootPattern := "."
+		if i > 0 {
+			rootPattern = strings.Join(parts[:i], separator)
+			if filepath.IsAbs(pattern) && rootPattern == filepath.VolumeName(pattern) {
+				rootPattern += separator
+			}
+		}
+		roots, err := filepath.Glob(rootPattern)
+		if err != nil {
+			return nil, err
+		}
+		suffix := strings.Join(parts[i+1:], separator)
+		seen := make(map[string]bool)
+		var matches []string
+		var visit func(string) error
+		visit = func(dir string) error {
+			found, err := globInputs(filepath.Join(escapeGlobPath(dir), suffix))
+			if err != nil {
+				return err
+			}
+			for _, match := range found {
+				if !seen[match] {
+					seen[match] = true
+					matches = append(matches, match)
+				}
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				return fmt.Errorf("read directory %q: %w", dir, err)
+			}
+			for _, entry := range entries {
+				if entry.IsDir() {
+					if err := visit(filepath.Join(dir, entry.Name())); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+		for _, root := range roots {
+			info, err := os.Stat(root)
+			if err != nil {
+				return nil, fmt.Errorf("inspect directory %q: %w", root, err)
+			}
+			if info.IsDir() {
+				if err := visit(root); err != nil {
+					return nil, err
+				}
+			}
+		}
+		sort.Strings(matches)
+		return matches, nil
+	}
+	return filepath.Glob(pattern)
+}
+
+func escapeGlobPath(path string) string {
+	var escaped strings.Builder
+	for _, char := range path {
+		switch char {
+		case '*', '?', '[':
+			escaped.WriteByte('[')
+			escaped.WriteRune(char)
+			escaped.WriteByte(']')
+		case '\\':
+			if filepath.Separator != '\\' {
+				escaped.WriteByte('\\')
+			}
+			escaped.WriteRune(char)
+		default:
+			escaped.WriteRune(char)
+		}
+	}
+	return escaped.String()
 }
 
 func planOutputs(inputs []string, format, outdir string) ([]string, error) {
