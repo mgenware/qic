@@ -3,22 +3,22 @@
 qic (Quick Image Conversion) converts files to common image formats using
 opinionated settings, powered by ImageMagick.
 
+## Prerequisites
+
+- ImageMagick 7 executable `magick` must be in system `PATH`.
+
 ## Supported formats
 
-| Format | Settings                                      |
-| ------ | --------------------------------------------- |
-| `webp` | Lossless, maximum standard compression effort |
-| `jxl`  | Lossless, maximum standard compression effort |
-| `avif` | Use `-q` to set quality                       |
-| `jpeg` | Use `-q` to set quality                       |
+| Format | Settings                             |
+| ------ | ------------------------------------ |
+| `webp` | Lossless, maximum compression effort |
+| `jxl`  | Lossless, maximum compression effort |
+| `avif` | Use `-q` to set quality              |
+| `jpeg` | Use `-q` to set quality              |
 
 WebP and JPEG XL use `-quality 100` for lossless encoding, with
 `webp:method=6` for WebP and `jxl:effort=9` for JPEG XL. Maximum effort
 can make conversion slower.
-
-## Prerequisites
-
-- ImageMagick 7 executable `magick` must be in `PATH`.
 
 ## Installation
 
