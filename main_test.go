@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,7 +69,7 @@ func TestRunConversions(t *testing.T) {
 			writeFile(t, output, "old")
 
 			var stderr bytes.Buffer
-			if err := run([]string{tt.format, input}, &stderr); err != nil {
+			if err := run([]string{tt.format, input}, io.Discard, &stderr); err != nil {
 				t.Fatal(err)
 			}
 			if got := readFile(t, output); got != "converted" {
@@ -85,6 +86,63 @@ func TestRunConversions(t *testing.T) {
 	}
 }
 
+func TestConversionReports(t *testing.T) {
+	installFakeEncoder(t, "magick", `for output do :; done
+case "$1" in
+  *decrease.png) printf '%088d' 0 > "$output" ;;
+  *increase.png) printf '%0105d' 0 > "$output" ;;
+  *unchanged.png) printf '%0100d' 0 > "$output" ;;
+  *small.png) printf '%0999d' 0 > "$output" ;;
+  *empty.png) printf converted > "$output" ;;
+esac
+`)
+	dir := t.TempDir()
+	for _, file := range []struct {
+		name string
+		size int
+	}{
+		{"decrease.png", 100},
+		{"empty.png", 0},
+		{"increase.png", 100},
+		{"small.png", 1000},
+		{"unchanged.png", 100},
+	} {
+		writeFile(t, filepath.Join(dir, file.name), strings.Repeat("x", file.size))
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"jxl", filepath.Join(dir, "*.png")}, &stdout, &stderr); err != nil {
+		t.Fatalf("%v: %s", err, &stderr)
+	}
+	want := "\x1b[32m-12%\x1b[0m " + filepath.Join(dir, "decrease.jxl") + "\n" +
+		"n/a " + filepath.Join(dir, "empty.jxl") + "\n" +
+		"\x1b[31m+5%\x1b[0m " + filepath.Join(dir, "increase.jxl") + "\n" +
+		"\x1b[32m-0%\x1b[0m " + filepath.Join(dir, "small.jxl") + "\n" +
+		"0% " + filepath.Join(dir, "unchanged.jxl") + "\n"
+	if got := stdout.String(); got != want {
+		t.Fatalf("report = %q, want %q", got, want)
+	}
+}
+
+func TestReportWriteFailure(t *testing.T) {
+	installFakeEncoder(t, "magick", fakeMagick)
+	dir := t.TempDir()
+	input := filepath.Join(dir, "input.png")
+	writeFile(t, input, "source")
+	reader, writer := io.Pipe()
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	err := run([]string{"webp", input}, writer, &bytes.Buffer{})
+	if !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("error = %v, want closed pipe", err)
+	}
+	if got := readFile(t, filepath.Join(dir, "input.webp")); got != "converted" {
+		t.Fatalf("output = %q", got)
+	}
+}
+
 func TestQualityArguments(t *testing.T) {
 	for _, format := range []string{"avif", "jpeg"} {
 		for _, quality := range []string{"0", "80", "100"} {
@@ -95,7 +153,7 @@ func TestQualityArguments(t *testing.T) {
 				t.Setenv("QIC_LOG", log)
 				input := filepath.Join(dir, "input.png")
 				writeFile(t, input, "source")
-				if err := run([]string{"-q", quality, "-size", "100x", format, input}, &bytes.Buffer{}); err != nil {
+				if err := run([]string{"-q", quality, "-size", "100x", format, input}, io.Discard, &bytes.Buffer{}); err != nil {
 					t.Fatal(err)
 				}
 				args := strings.Split(strings.TrimSpace(readFile(t, log)), "\n")
@@ -118,7 +176,7 @@ func TestSizeArguments(t *testing.T) {
 				t.Setenv("QIC_LOG", log)
 				input := filepath.Join(dir, "input.png")
 				writeFile(t, input, "source")
-				if err := run([]string{"-size", size, format, input}, &bytes.Buffer{}); err != nil {
+				if err := run([]string{"-size", size, format, input}, io.Discard, &bytes.Buffer{}); err != nil {
 					t.Fatal(err)
 				}
 				args := strings.Split(strings.TrimSpace(readFile(t, log)), "\n")
@@ -140,7 +198,7 @@ func TestGlobAndOutputDirectory(t *testing.T) {
 	for _, name := range []string{"a.png", "b.png"} {
 		writeFile(t, filepath.Join(dir, name), "source")
 	}
-	if err := run([]string{"webp", filepath.Join(dir, "*.png"), out}, &bytes.Buffer{}); err != nil {
+	if err := run([]string{"webp", filepath.Join(dir, "*.png"), out}, io.Discard, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"a.webp", "b.webp"} {
@@ -175,7 +233,7 @@ func TestRecursiveGlob(t *testing.T) {
 		if len(inputs) != 5 {
 			t.Fatalf("pattern %q matched %v, want 5 files", pattern, inputs)
 		}
-		if err := run([]string{"jxl", pattern}, &bytes.Buffer{}); err != nil {
+		if err := run([]string{"jxl", pattern}, io.Discard, &bytes.Buffer{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -206,7 +264,7 @@ func TestSingleInputOutputDirectory(t *testing.T) {
 	input := filepath.Join(dir, "photo.png")
 	writeFile(t, input, "source")
 	for _, selection := range []string{input, filepath.Join(dir, "*.png")} {
-		if err := run([]string{"webp", selection, out}, &bytes.Buffer{}); err != nil {
+		if err := run([]string{"webp", selection, out}, io.Discard, &bytes.Buffer{}); err != nil {
 			t.Fatal(err)
 		}
 		if got := readFile(t, filepath.Join(out, "photo.webp")); got != "converted" {
@@ -255,7 +313,7 @@ func TestRunErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := run(tt.args, &bytes.Buffer{})
+			err := run(tt.args, io.Discard, &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
@@ -270,10 +328,13 @@ func TestConversionFailurePreservesOutput(t *testing.T) {
 	output := filepath.Join(dir, "input.webp")
 	writeFile(t, input, "source")
 	writeFile(t, output, "old")
-	var stderr bytes.Buffer
-	err := run([]string{"webp", input, dir}, &stderr)
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"webp", input, dir}, &stdout, &stderr)
 	if err == nil || !strings.Contains(stderr.String(), "encoder failed") {
 		t.Fatalf("error = %v, stderr = %q", err, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("reported failed conversion: %q", stdout.String())
 	}
 	if got := readFile(t, output); got != "old" {
 		t.Fatalf("output changed: %q", got)
@@ -288,7 +349,7 @@ func TestMissingEncoder(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	input := filepath.Join(t.TempDir(), "input.png")
 	writeFile(t, input, "source")
-	err := run([]string{"jxl", input}, &bytes.Buffer{})
+	err := run([]string{"jxl", input}, io.Discard, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "magick is required") || !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -334,7 +395,7 @@ func testRealLossless(t *testing.T, format string) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	if err := run([]string{format, input}, &stderr); err != nil {
+	if err := run([]string{format, input}, io.Discard, &stderr); err != nil {
 		t.Fatalf("%v: %s", err, &stderr)
 	}
 	decodedPath := filepath.Join(dir, "decoded.png")
@@ -390,7 +451,7 @@ func TestRealResize(t *testing.T) {
 					args = append(args, "-q", "80")
 				}
 				args = append(args, format, input)
-				if err := run(args, &stderr); err != nil {
+				if err := run(args, io.Discard, &stderr); err != nil {
 					t.Fatalf("%v: %s", err, &stderr)
 				}
 				output, err := exec.Command(magick, "identify", "-format", "%wx%h", filepath.Join(dir, "input."+format)).CombinedOutput()

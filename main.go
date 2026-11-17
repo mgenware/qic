@@ -34,13 +34,13 @@ outdir must be an existing directory.
 `
 
 func main() {
-	if err := run(os.Args[1:], os.Stderr); err != nil {
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "qic:", err)
 		os.Exit(1)
 	}
 }
 
-func run(args []string, stderr io.Writer) error {
+func run(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("qic", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() { fmt.Fprint(stderr, usage) }
@@ -98,8 +98,31 @@ func run(args []string, stderr io.Writer) error {
 	}
 
 	for i, input := range inputs {
+		inputInfo, err := os.Stat(input)
+		if err != nil {
+			return fmt.Errorf("inspect input %q: %w", input, err)
+		}
 		if err := convert(encoder, format, input, outputs[i], *size, quality, stderr); err != nil {
 			return err
+		}
+		outputInfo, err := os.Stat(outputs[i])
+		if err != nil {
+			return fmt.Errorf("inspect output %q: %w", outputs[i], err)
+		}
+		change := "n/a"
+		if inputInfo.Size() > 0 {
+			difference := outputInfo.Size() - inputInfo.Size()
+			switch {
+			case difference < 0:
+				change = fmt.Sprintf("\x1b[32m%+.0f%%\x1b[0m", float64(difference)*100/float64(inputInfo.Size()))
+			case difference > 0:
+				change = fmt.Sprintf("\x1b[31m%+.0f%%\x1b[0m", float64(difference)*100/float64(inputInfo.Size()))
+			default:
+				change = "0%"
+			}
+		}
+		if _, err := fmt.Fprintf(stdout, "%s %s\n", change, outputs[i]); err != nil {
+			return fmt.Errorf("report output %q: %w", outputs[i], err)
 		}
 	}
 	return nil
