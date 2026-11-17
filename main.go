@@ -2,19 +2,29 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
-const usage = `Usage: qic <format> <input> [outdir]
+const usage = `Usage: qic [-size geometry] [-q quality] <format> <input> [outdir]
 
 Formats:
-  webp  lossless WebP (requires cwebp in PATH)
-  jxl   lossless JPEG XL (requires cjxl in PATH)
+  webp  lossless WebP, maximum standard compression effort
+  jxl   lossless JPEG XL, maximum standard compression effort
+  avif  AVIF, use -q to set quality
+  jpeg  JPEG, use -q to set quality
+
+Requires ImageMagick 7's magick in PATH with support for the selected format.
+Optional -size geometry (e.g. 100x, x100, 100x100) is passed to magick -resize
+with > appended to fit the specified dimensions without ever upscaling.
+Optional -q quality (0-100) applies only to AVIF and JPEG; if omitted,
+ImageMagick's default quality is used.
 
 Input is a file or a glob pattern. Quote glob patterns to prevent shell expansion.
 By default, output files are saved alongside their inputs. If specified,
@@ -29,23 +39,40 @@ func main() {
 }
 
 func run(args []string, stderr io.Writer) error {
-	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		_, err := io.WriteString(stderr, usage)
+	flags := flag.NewFlagSet("qic", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.Usage = func() { fmt.Fprint(stderr, usage) }
+	size := flags.String("size", "", "maximum dimensions, resized without upscaling")
+	quality := ""
+	flags.Func("q", "AVIF/JPEG quality (0-100; default: ImageMagick's default)", func(value string) error {
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 || n > 100 {
+			return errors.New("quality must be an integer between 0 and 100")
+		}
+		quality = strconv.Itoa(n)
+		return nil
+	})
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
+	args = flags.Args()
 	if len(args) < 2 || len(args) > 3 {
 		return errors.New(usage)
 	}
 
 	format := args[0]
-	var executable string
 	switch format {
-	case "webp":
-		executable = "cwebp"
-	case "jxl":
-		executable = "cjxl"
+	case "webp", "jxl":
+		if quality != "" {
+			return errors.New("-q is only supported for avif and jpeg; webp and jxl are always lossless")
+		}
+		quality = "100"
+	case "avif", "jpeg":
 	default:
-		return fmt.Errorf("unsupported format %q (expected webp or jxl)", format)
+		return fmt.Errorf("unsupported format %q (expected webp, jxl, avif, or jpeg)", format)
 	}
 
 	inputs, err := findInputs(args[1])
@@ -63,13 +90,13 @@ func run(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	encoder, err := exec.LookPath(executable)
+	encoder, err := exec.LookPath("magick")
 	if err != nil {
-		return fmt.Errorf("%s is required for %s conversion: %w", executable, format, err)
+		return fmt.Errorf("magick is required for %s conversion: %w", format, err)
 	}
 
 	for i, input := range inputs {
-		if err := convert(encoder, format, input, outputs[i], stderr); err != nil {
+		if err := convert(encoder, format, input, outputs[i], *size, quality, stderr); err != nil {
 			return err
 		}
 	}
@@ -170,7 +197,7 @@ func planOutputs(inputs []string, format, outdir string) ([]string, error) {
 	return outputs, nil
 }
 
-func convert(encoder, format, input, output string, stderr io.Writer) error {
+func convert(encoder, format, input, output, size, quality string, stderr io.Writer) error {
 	temp, err := os.CreateTemp(filepath.Dir(output), ".qic-*."+format)
 	if err != nil {
 		return fmt.Errorf("prepare output %q: %w", output, err)
@@ -181,13 +208,20 @@ func convert(encoder, format, input, output string, stderr io.Writer) error {
 		return fmt.Errorf("prepare output %q: %w", output, err)
 	}
 
-	var args []string
+	args := []string{input}
+	if size != "" {
+		args = append(args, "-resize", size+">")
+	}
+	if quality != "" {
+		args = append(args, "-quality", quality)
+	}
 	switch format {
 	case "webp":
-		args = []string{"-lossless", "-exact", "-m", "6", "-q", "100", input, "-o", tempPath}
+		args = append(args, "-define", "webp:lossless=true", "-define", "webp:exact=true", "-define", "webp:method=6")
 	case "jxl":
-		args = []string{input, tempPath, "-d", "0", "-e", "9"}
+		args = append(args, "-define", "jxl:effort=9")
 	}
+	args = append(args, tempPath)
 	cmd := exec.Command(encoder, args...)
 	cmd.Stdout = stderr
 	cmd.Stderr = stderr

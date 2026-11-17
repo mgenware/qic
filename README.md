@@ -1,13 +1,24 @@
 # qic
 
-qic (Quick Image Conversion) converts files to lossless WebP or JPEG XL.
-Both formats use the encoders' maximum standard compression effort, which can
-make conversion slower. WebP uses `-q 100` and `-m 6`.
+qic (Quick Image Conversion) converts files to common image formats using
+opinionated settings, powered by ImageMagick.
+
+## Supported formats
+
+| Format | Settings                                      |
+| ------ | --------------------------------------------- |
+| `webp` | Lossless, maximum standard compression effort |
+| `jxl`  | Lossless, maximum standard compression effort |
+| `avif` | Use `-q` to set quality                       |
+| `jpeg` | Use `-q` to set quality                       |
+
+WebP and JPEG XL use `-quality 100` for lossless encoding, with
+`webp:method=6` for WebP and `jxl:effort=9` for JPEG XL. Maximum effort
+can make conversion slower.
 
 ## Prerequisites
 
-- `cwebp` in `PATH` for WebP
-- `cjxl` in `PATH` for JPEG XL
+- ImageMagick 7 executable `magick` must be in `PATH`.
 
 ## Installation
 
@@ -24,22 +35,34 @@ is in your `PATH`. Alternatively, build from a local checkout with
 ## Usage
 
 ```text
-qic <format> <input> [outdir]
+Usage: qic [-size geometry] [-q quality] <format> <input> [outdir]
+
+Formats:
+  webp  lossless WebP, maximum standard compression effort
+  jxl   lossless JPEG XL, maximum standard compression effort
+  avif  AVIF, use -q to set quality
+  jpeg  JPEG, use -q to set quality
+
+Requires ImageMagick 7's magick in PATH with support for the selected format.
+Optional -size geometry (e.g. 100x, x100, 100x100) is passed to magick -resize
+with > appended to fit the specified dimensions without ever upscaling.
+Optional -q quality (0-100) applies only to AVIF and JPEG; if omitted,
+ImageMagick's default quality is used.
+
+Input is a file or a glob pattern. Quote glob patterns to prevent shell expansion.
+By default, output files are saved alongside their inputs. If specified,
+outdir must be an existing directory.
 ```
 
-`format` is `webp` or `jxl`. `input` is a file or a glob pattern; quote
-patterns to prevent the shell from expanding them. Without `outdir`, each
-converted file is saved next to its input, with its extension replaced.
-If provided, `outdir` must be an existing directory, for both single and
-multiple inputs.
-
-Existing output files are overwritten. An output cannot be an input file,
-and multiple inputs cannot map to the same output. A failed conversion
-leaves its existing output unchanged; when converting multiple files,
-previously completed conversions are not rolled back.
+## Examples
 
 ```sh
 qic webp photo.png
 qic jxl 'photos/*.png' converted/
 qic webp photo.png converted/
+qic -size 100x webp photo.png
+qic -size x100 jxl 'photos/*.png' converted/
+qic -size 100x100 webp photo.png
+qic -q 80 avif photo.png
+qic -size 100x100 -q 85 jpeg photo.png converted/
 ```

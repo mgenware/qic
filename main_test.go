@@ -44,19 +44,21 @@ func installFakeEncoder(t *testing.T, name, script string) {
 	t.Setenv("PATH", bin)
 }
 
+const fakeMagick = "for output do :; done\nprintf converted > \"$output\"\n"
+
 func TestRunConversions(t *testing.T) {
 	tests := []struct {
 		format string
-		binary string
-		script string
 		flags  []string
 	}{
-		{"webp", "cwebp", "printf '%s\\n' \"$@\" >> \"$QIC_LOG\"\nprintf converted > \"$9\"\n", []string{"-lossless", "-exact", "-m", "6", "-q", "100"}},
-		{"jxl", "cjxl", "printf '%s\\n' \"$@\" >> \"$QIC_LOG\"\nprintf converted > \"$2\"\n", []string{"-d", "0", "-e", "9"}},
+		{"webp", []string{"-quality", "100", "-define", "webp:lossless=true", "-define", "webp:exact=true", "-define", "webp:method=6"}},
+		{"jxl", []string{"-quality", "100", "-define", "jxl:effort=9"}},
+		{"avif", []string{}},
+		{"jpeg", []string{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.format, func(t *testing.T) {
-			installFakeEncoder(t, tt.binary, tt.script)
+			installFakeEncoder(t, "magick", "printf '%s\\n' \"$@\" >> \"$QIC_LOG\"\n"+fakeMagick)
 			dir := t.TempDir()
 			log := filepath.Join(dir, "args.log")
 			t.Setenv("QIC_LOG", log)
@@ -76,19 +78,60 @@ func TestRunConversions(t *testing.T) {
 				t.Fatalf("input changed: %q", got)
 			}
 			args := strings.Split(strings.TrimSpace(readFile(t, log)), "\n")
-			if tt.format == "webp" {
-				if len(args) != 9 || !reflect.DeepEqual(args[:6], tt.flags) || args[6] != input || args[7] != "-o" {
-					t.Fatalf("unexpected encoder arguments: %q", args)
-				}
-			} else if len(args) != 6 || args[0] != input || !reflect.DeepEqual(args[2:], tt.flags) {
+			if len(args) != len(tt.flags)+2 || args[0] != input || !reflect.DeepEqual(args[1:len(args)-1], tt.flags) {
 				t.Fatalf("unexpected encoder arguments: %q", args)
 			}
 		})
 	}
 }
 
+func TestQualityArguments(t *testing.T) {
+	for _, format := range []string{"avif", "jpeg"} {
+		for _, quality := range []string{"0", "80", "100"} {
+			t.Run(format+"/"+quality, func(t *testing.T) {
+				installFakeEncoder(t, "magick", "printf '%s\\n' \"$@\" > \"$QIC_LOG\"\n"+fakeMagick)
+				dir := t.TempDir()
+				log := filepath.Join(dir, "args.log")
+				t.Setenv("QIC_LOG", log)
+				input := filepath.Join(dir, "input.png")
+				writeFile(t, input, "source")
+				if err := run([]string{"-q", quality, "-size", "100x", format, input}, &bytes.Buffer{}); err != nil {
+					t.Fatal(err)
+				}
+				args := strings.Split(strings.TrimSpace(readFile(t, log)), "\n")
+				want := []string{input, "-resize", "100x>", "-quality", quality}
+				if len(args) != len(want)+1 || !reflect.DeepEqual(args[:len(want)], want) {
+					t.Fatalf("unexpected quality arguments: %q", args)
+				}
+			})
+		}
+	}
+}
+
+func TestSizeArguments(t *testing.T) {
+	for _, format := range []string{"webp", "jxl"} {
+		for _, size := range []string{"100x", "x100", "100x100"} {
+			t.Run(format+"/"+size, func(t *testing.T) {
+				installFakeEncoder(t, "magick", "printf '%s\\n' \"$@\" > \"$QIC_LOG\"\n"+fakeMagick)
+				dir := t.TempDir()
+				log := filepath.Join(dir, "args.log")
+				t.Setenv("QIC_LOG", log)
+				input := filepath.Join(dir, "input.png")
+				writeFile(t, input, "source")
+				if err := run([]string{"-size", size, format, input}, &bytes.Buffer{}); err != nil {
+					t.Fatal(err)
+				}
+				args := strings.Split(strings.TrimSpace(readFile(t, log)), "\n")
+				if len(args) < 3 || !reflect.DeepEqual(args[:3], []string{input, "-resize", size + ">"}) {
+					t.Fatalf("unexpected resize arguments: %q", args)
+				}
+			})
+		}
+	}
+}
+
 func TestGlobAndOutputDirectory(t *testing.T) {
-	installFakeEncoder(t, "cwebp", "printf converted > \"$9\"\n")
+	installFakeEncoder(t, "magick", fakeMagick)
 	dir := t.TempDir()
 	out := filepath.Join(dir, "out")
 	if err := os.Mkdir(out, 0o700); err != nil {
@@ -108,7 +151,7 @@ func TestGlobAndOutputDirectory(t *testing.T) {
 }
 
 func TestSingleInputOutputDirectory(t *testing.T) {
-	installFakeEncoder(t, "cwebp", "printf converted > \"$9\"\n")
+	installFakeEncoder(t, "magick", fakeMagick)
 	dir := t.TempDir()
 	out := filepath.Join(dir, "out")
 	if err := os.Mkdir(out, 0o700); err != nil {
@@ -153,6 +196,16 @@ func TestRunErrors(t *testing.T) {
 		{"colliding outputs", []string{"webp", filepath.Join(dir, "photo.*")}, "multiple inputs map"},
 		{"overwrite input", []string{"webp", sameFormat, dir}, "would overwrite input"},
 		{"empty output", []string{"webp", input, ""}, "outdir must not be empty"},
+		{"missing size", []string{"-size"}, "flag needs an argument"},
+		{"unknown flag", []string{"-unknown", "webp", input}, "flag provided but not defined"},
+		{"missing quality", []string{"-q"}, "flag needs an argument"},
+		{"empty quality", []string{"-q", "", "jpeg", input}, "quality must be an integer between 0 and 100"},
+		{"negative quality", []string{"-q", "-1", "jpeg", input}, "quality must be an integer between 0 and 100"},
+		{"quality too high", []string{"-q", "101", "avif", input}, "quality must be an integer between 0 and 100"},
+		{"noninteger quality", []string{"-q", "80.5", "avif", input}, "quality must be an integer between 0 and 100"},
+		{"nonnumeric quality", []string{"-q", "high", "jpeg", input}, "quality must be an integer between 0 and 100"},
+		{"webp quality", []string{"-q", "80", "webp", input}, "-q is only supported for avif and jpeg"},
+		{"jxl quality", []string{"-q", "100", "jxl", input}, "-q is only supported for avif and jpeg"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -165,7 +218,7 @@ func TestRunErrors(t *testing.T) {
 }
 
 func TestConversionFailurePreservesOutput(t *testing.T) {
-	installFakeEncoder(t, "cwebp", "printf incomplete > \"$9\"\nprintf 'encoder failed\\n' >&2\nexit 7\n")
+	installFakeEncoder(t, "magick", "for output do :; done\nprintf incomplete > \"$output\"\nprintf 'encoder failed\\n' >&2\nexit 7\n")
 	dir := t.TempDir()
 	input := filepath.Join(dir, "input.png")
 	output := filepath.Join(dir, "input.webp")
@@ -190,7 +243,7 @@ func TestMissingEncoder(t *testing.T) {
 	input := filepath.Join(t.TempDir(), "input.png")
 	writeFile(t, input, "source")
 	err := run([]string{"jxl", input}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "cjxl is required") || !errors.Is(err, exec.ErrNotFound) {
+	if err == nil || !strings.Contains(err.Error(), "magick is required") || !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -204,13 +257,19 @@ func TestLiteralGlobCharacters(t *testing.T) {
 	}
 }
 
-func TestRealWebPLossless(t *testing.T) {
-	if _, err := exec.LookPath("cwebp"); err != nil {
-		t.Skip("cwebp not installed")
+func TestRealLossless(t *testing.T) {
+	for _, format := range []string{"webp", "jxl"} {
+		t.Run(format, func(t *testing.T) {
+			testRealLossless(t, format)
+		})
 	}
-	dwebp, err := exec.LookPath("dwebp")
+}
+
+func testRealLossless(t *testing.T, format string) {
+	t.Helper()
+	magick, err := exec.LookPath("magick")
 	if err != nil {
-		t.Skip("dwebp not installed")
+		t.Skip("ImageMagick 7 not installed")
 	}
 	dir := t.TempDir()
 	input := filepath.Join(dir, "input.png")
@@ -229,11 +288,11 @@ func TestRealWebPLossless(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	if err := run([]string{"webp", input}, &stderr); err != nil {
+	if err := run([]string{format, input}, &stderr); err != nil {
 		t.Fatalf("%v: %s", err, &stderr)
 	}
 	decodedPath := filepath.Join(dir, "decoded.png")
-	cmd := exec.Command(dwebp, filepath.Join(dir, "input.webp"), "-o", decodedPath)
+	cmd := exec.Command(magick, filepath.Join(dir, "input."+format), decodedPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("decode: %v: %s", err, output)
 	}
@@ -250,6 +309,52 @@ func TestRealWebPLossless(t *testing.T) {
 		got := color.NRGBAModel.Convert(decoded.At(x, 0)).(color.NRGBA)
 		if want := img.NRGBAAt(x, 0); got != want {
 			t.Errorf("pixel %d = %v, want %v", x, got, want)
+		}
+	}
+}
+
+func TestRealResize(t *testing.T) {
+	magick, err := exec.LookPath("magick")
+	if err != nil {
+		t.Skip("ImageMagick 7 not installed")
+	}
+	dir := t.TempDir()
+	input := filepath.Join(dir, "input.png")
+	if output, err := exec.Command(magick, "-size", "200x100", "xc:red", input).CombinedOutput(); err != nil {
+		t.Fatalf("create input: %v: %s", err, output)
+	}
+	tests := []struct {
+		size string
+		want string
+	}{
+		{"100x", "100x50"},
+		{"x25", "50x25"},
+		{"100x100", "100x50"},
+		{"400x", "200x100"},
+		{"x400", "200x100"},
+		{"400x400", "200x100"},
+		{"400x50", "100x50"},
+	}
+	for _, format := range []string{"webp", "jxl", "avif", "jpeg"} {
+		for _, tt := range tests {
+			t.Run(format+"/"+tt.size, func(t *testing.T) {
+				var stderr bytes.Buffer
+				args := []string{"-size", tt.size}
+				if format == "avif" || format == "jpeg" {
+					args = append(args, "-q", "80")
+				}
+				args = append(args, format, input)
+				if err := run(args, &stderr); err != nil {
+					t.Fatalf("%v: %s", err, &stderr)
+				}
+				output, err := exec.Command(magick, "identify", "-format", "%wx%h", filepath.Join(dir, "input."+format)).CombinedOutput()
+				if err != nil {
+					t.Fatalf("identify output: %v: %s", err, output)
+				}
+				if string(output) != tt.want {
+					t.Fatalf("dimensions = %q, want %q", output, tt.want)
+				}
+			})
 		}
 	}
 }
